@@ -1,6 +1,6 @@
 // ============================================================================
 // FILE: panda-browser/src/main.zig
-// Standalone Zig 0.17+ entry point, ArenaAllocator lifecycle, HTTP & CDP server
+// Standalone Zig 0.17+ entry point: GUI window + headless ArenaAllocator CLI
 // ============================================================================
 const std = @import("std");
 const opts = @import("build_options");
@@ -38,6 +38,7 @@ extern fn cpp_eval_script(
     out_buf: [*]u8,
     out_cap: usize,
 ) usize;
+extern fn cpp_launch_gui(initial_url: [*:0]const u8) i32;
 extern fn cpp_engine_shutdown() void;
 
 pub fn main(init: std.process.Init) !void {
@@ -50,8 +51,43 @@ pub fn main(init: std.process.Init) !void {
     }
     defer cpp_engine_shutdown();
 
-    if (args.len < 2 or std.mem.eql(u8, args[1], "--info")) {
+    // No arguments (e.g. desktop launcher or bare `panda-browser`):
+    // open the full GUI window if enabled, otherwise show build info.
+    if (args.len < 2) {
+        if (comptime opts.use_gui) {
+            if (cpp_launch_gui("https://duckduckgo.com") != 0) {
+                return error.GuiLaunchFailed;
+            }
+        } else {
+            printBuildInfo(io);
+        }
+        return;
+    }
+
+    if (std.mem.eql(u8, args[1], "--info") or std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h")) {
         printBuildInfo(io);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[1], "--gui")) {
+        if (comptime !opts.use_gui) {
+            std.debug.print("Error: Recompile with -Duse-gui=true to enable GUI mode.\n", .{});
+            return;
+        } else {
+            const url: [*:0]const u8 = if (args.len >= 3) args[2].ptr else "https://duckduckgo.com";
+            if (cpp_launch_gui(url) != 0) {
+                return error.GuiLaunchFailed;
+            }
+            return;
+        }
+    }
+
+    if (std.mem.eql(u8, args[1], "--headless")) {
+        if (args.len < 3) {
+            std.debug.print("Usage: panda-browser --headless <url-or-html>\n", .{});
+            return;
+        }
+        try processTargetPage(io, base_alloc, args[2]);
         return;
     }
 
@@ -84,6 +120,20 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    // If GUI is enabled and user passed a URL (e.g. `panda-browser https://archlinux.org`
+    // or clicked a link via desktop MIME handler), open it in the browser window.
+    if (comptime opts.use_gui) {
+        const is_url = std.mem.startsWith(u8, args[1], "http://") or
+            std.mem.startsWith(u8, args[1], "https://") or
+            std.mem.startsWith(u8, args[1], "file://");
+        if (is_url) {
+            if (cpp_launch_gui(args[1].ptr) != 0) {
+                return error.GuiLaunchFailed;
+            }
+            return;
+        }
+    }
+
     try processTargetPage(io, base_alloc, args[1]);
 }
 
@@ -93,8 +143,9 @@ fn printBuildInfo(io: std.Io) void {
     const out = &stdout_writer.interface;
 
     out.print(
-        \\panda-browser (Zig + C++20 Hybrid Headless Engine)
+        \\panda-browser (Zig + C++20 Hybrid Browser Engine)
         \\Active Gentoo-Style USE Flags:
+        \\  use-gui     : {}
         \\  use-quickjs : {}
         \\  use-v8      : {}
         \\  use-simd    : {}
@@ -104,13 +155,16 @@ fn printBuildInfo(io: std.Io) void {
         \\  arena-kb    : {d} KB
         \\
         \\Usage:
-        \\  panda-browser https://example.com
-        \\  panda-browser --file page.html
-        \\  panda-browser "<html><title>Hi</title><body>Hello</body></html>"
+        \\  panda-browser                      (launch GUI browser when use-gui=true)
+        \\  panda-browser https://example.com  (open URL in GUI, or headless if use-gui=false)
+        \\  panda-browser --gui [url]          (force GUI window)
+        \\  panda-browser --headless <target>  (force fast headless text/link dump)
+        \\  panda-browser --file page.html     (parse local HTML file headlessly)
         \\  panda-browser --eval "1 + 1"
         \\  panda-browser --cdp 9222
         \\
     , .{
+        opts.use_gui,
         opts.use_quickjs,
         opts.use_v8,
         opts.use_simd,
