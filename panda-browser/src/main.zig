@@ -5,204 +5,306 @@
 const std = @import("std");
 const opts = @import("build_options");
 
+comptime {
+    if (opts.max_pages == 0) {
+        @compileError("max-pages must be greater than 0");
+    }
+    if (opts.arena_kb == 0) {
+        @compileError("arena-kb must be greater than 0");
+    }
+}
+
 // C-ABI declarations matching src/engine_bridge.cpp
 extern "C" {
-const PandaParseStats = extern struct {
-text_len: usize,
-title_len: usize,
-link_count: usize,
-script_count: usize,
-parse_us: u32,
-};
+    const PandaParseStats = extern struct {
+        text_len: usize,
+        title_len: usize,
+        link_count: usize,
+        script_count: usize,
+        parse_us: u32,
+    };
 
-fn cpp_engine_init(enable_simd: bool, max_pages: u32) callconv(.c) i32;
-fn cpp_parse_document(
-    html_ptr: [*]const u8,
-    html_len: usize,
-    title_buf: [*]u8,
-    title_cap: usize,
-    text_buf: [*]u8,
-    text_cap: usize,
-) callconv(.c) PandaParseStats;
-fn cpp_eval_script(
-    script_ptr: [*]const u8,
-    script_len: usize,
-    out_buf: [*]u8,
-    out_cap: usize,
-) callconv(.c) usize;
-fn cpp_engine_shutdown() callconv(.c) void;
-
-
+    fn cpp_engine_init(enable_simd: bool, max_pages: u32) callconv(.c) i32;
+    fn cpp_parse_document(
+        html_ptr: [*]const u8,
+        html_len: usize,
+        title_buf: [*]u8,
+        title_cap: usize,
+        text_buf: [*]u8,
+        text_cap: usize,
+    ) callconv(.c) PandaParseStats;
+    fn cpp_eval_script(
+        script_ptr: [*]const u8,
+        script_len: usize,
+        out_buf: [*]u8,
+        out_cap: usize,
+    ) callconv(.c) usize;
+    fn cpp_engine_shutdown() callconv(.c) void;
 }
 
 pub fn main() !void {
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-defer _ = gpa.deinit();
-const base_alloc = gpa.allocator();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const base_alloc = gpa.allocator();
 
-const args = try std.process.argsAlloc(base_alloc);
-defer std.process.argsFree(base_alloc, args);
+    const args = try std.process.argsAlloc(base_alloc);
+    defer std.process.argsFree(base_alloc, args);
 
-if (cpp_engine_init(opts.use_simd, opts.max_pages) != 0) {
-    return error.CppEngineInitFailed;
-}
-defer cpp_engine_shutdown();
+    if (cpp_engine_init(opts.use_simd, opts.max_pages) != 0) {
+        return error.CppEngineInitFailed;
+    }
+    defer cpp_engine_shutdown();
 
-if (args.len < 2 or std.mem.eql(u8, args[1], "--info")) {
-    printBuildInfo();
-    return;
-}
-
-if (std.mem.eql(u8, args[1], "--eval")) {
-    if (args.len < 3) {
-        std.debug.print("Usage: panda-browser --eval \"<expression>\"\n", .{});
+    if (args.len < 2 or std.mem.eql(u8, args[1], "--info")) {
+        printBuildInfo();
         return;
     }
-    try evalInlineScript(base_alloc, args[2]);
-    return;
-}
 
-if (std.mem.eql(u8, args[1], "--cdp")) {
-    if (!opts.use_cdp) {
-        std.debug.print("Error: Recompile with -Duse-cdp=true to enable CDP server.\n", .{});
+    if (std.mem.eql(u8, args[1], "--eval")) {
+        if (args.len < 3) {
+            std.debug.print("Usage: panda-browser --eval \"<expression>\"\n", .{});
+            return;
+        }
+        try evalInlineScript(base_alloc, args[2]);
         return;
     }
-    const port: u16 = if (args.len >= 3) try std.fmt.parseInt(u16, args[2], 10) else 9222;
-    try runCdpServer(port);
-    return;
-}
 
-try processTargetPage(args[1]);
+    if (std.mem.eql(u8, args[1], "--cdp")) {
+        if (comptime !opts.use_cdp) {
+            std.debug.print("Error: Recompile with -Duse-cdp=true to enable CDP server.\n", .{});
+            return;
+        } else {
+            const port: u16 = if (args.len >= 3) try std.fmt.parseInt(u16, args[2], 10) else 9222;
+            try runCdpServer(port);
+            return;
+        }
+    }
 
+    if (std.mem.eql(u8, args[1], "--file")) {
+        if (args.len < 3) {
+            std.debug.print("Usage: panda-browser --file <path.html>\n", .{});
+            return;
+        }
+        try processFileTarget(base_alloc, args[2]);
+        return;
+    }
 
+    try processTargetPage(base_alloc, args[1]);
 }
 
 fn printBuildInfo() void {
-const stdout = std.fs.File.stdout().deprecatedWriter();
-stdout.print(
-\panda-browser (Zig + C++20 Hybrid Headless Engine)
-\Active Gentoo-Style USE Flags:
-\  use-quickjs : {}
-\  use-v8      : {}
-\  use-simd    : {}
-\  use-cdp     : {}
-\  use-net     : {}
-\  max-pages   : {d}
-\  arena-kb    : {d} KB
-\
-\Usage:
-\  panda-browser https://example.com
-\  panda-browser "TestHello"
-\  panda-browser --eval "1 + 1"
-\  panda-browser --cdp 9222
-\
-, .{
-opts.use_quickjs,
-opts.use_v8,
-opts.use_simd,
-opts.use_cdp,
-opts.use_net,
-opts.max_pages,
-opts.arena_kb,
-}) catch {};
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    stdout.print(
+        \\panda-browser (Zig + C++20 Hybrid Headless Engine)
+        \\Active Gentoo-Style USE Flags:
+        \\  use-quickjs : {}
+        \\  use-v8      : {}
+        \\  use-simd    : {}
+        \\  use-cdp     : {}
+        \\  use-net     : {}
+        \\  max-pages   : {d}
+        \\  arena-kb    : {d} KB
+        \\
+        \\Usage:
+        \\  panda-browser https://example.com
+        \\  panda-browser --file page.html
+        \\  panda-browser "<html><title>Hi</title><body>Hello</body></html>"
+        \\  panda-browser --eval "1 + 1"
+        \\  panda-browser --cdp 9222
+        \\
+    , .{
+        opts.use_quickjs,
+        opts.use_v8,
+        opts.use_simd,
+        opts.use_cdp,
+        opts.use_net,
+        opts.max_pages,
+        opts.arena_kb,
+    }) catch {};
 }
 
 fn evalInlineScript(alloc: std.mem.Allocator, script_src: []const u8) !void {
-const out_buf = try alloc.alloc(u8, 4096);
-defer alloc.free(out_buf);
+    const out_buf = try alloc.alloc(u8, 4096);
+    defer alloc.free(out_buf);
 
-const written = cpp_eval_script(
-    script_src.ptr,
-    script_src.len,
-    out_buf.ptr,
-    out_buf.len,
-);
+    const written = cpp_eval_script(
+        script_src.ptr,
+        script_src.len,
+        out_buf.ptr,
+        out_buf.len,
+    );
 
-const stdout = std.fs.File.stdout().deprecatedWriter();
-try stdout.print("{s}\n", .{out_buf[0..written]});
-
-
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    try stdout.print("{s}\n", .{out_buf[0..written]});
 }
 
-fn processTargetPage(target: []const u8) !void {
-// Per-page ArenaAllocator: everything allocated for this page is freed at once
-var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-defer arena.deinit();
-const alloc = arena.allocator();
+fn processFileTarget(base_alloc: std.mem.Allocator, file_path: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(base_alloc);
+    defer arena.deinit();
+    const alloc = arena.allocator();
 
-var html_bytes: []const u8 = target;
+    const max_bytes: usize = @as(usize, opts.arena_kb) * 1024 * 16; // Hard safety cap (16x arena_kb)
+    const html_bytes = try std.fs.cwd().readFileAlloc(alloc, file_path, max_bytes);
+    try parseAndPrint(alloc, html_bytes);
+}
 
-if (std.mem.startsWith(u8, target, "http://") or std.mem.startsWith(u8, target, "https://")) {
-    if (!opts.use_net) {
-        std.debug.print("Error: Recompile with -Duse-net=true to fetch URLs.\n", .{});
-        return;
+fn processTargetPage(base_alloc: std.mem.Allocator, target: []const u8) !void {
+    // Per-page ArenaAllocator: everything allocated for this page is freed at once
+    var arena = std.heap.ArenaAllocator.init(base_alloc);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var html_bytes: []const u8 = target;
+
+    if (std.mem.startsWith(u8, target, "http://") or std.mem.startsWith(u8, target, "https://")) {
+        if (comptime !opts.use_net) {
+            std.debug.print("Error: Recompile with -Duse-net=true to fetch URLs.\n", .{});
+            return;
+        } else {
+            var client = std.http.Client{ .allocator = alloc };
+            defer client.deinit();
+
+            var body_writer = std.Io.Writer.Allocating.init(alloc);
+            defer body_writer.deinit();
+
+            const res = try client.fetch(.{
+                .location = .{ .url = target },
+                .response_writer = &body_writer.writer,
+            });
+            if (res.status != .ok) {
+                std.debug.print("HTTP Status: {d}\n", .{@intFromEnum(res.status)});
+            }
+            html_bytes = body_writer.written();
+        }
     }
-    var client = std.http.Client{ .allocator = alloc };
-    defer client.deinit();
 
-    var body_writer = std.Io.Writer.Allocating.init(alloc);
-    const res = try client.fetch(.{
-        .location = .{ .url = target },
-        .response_writer = &body_writer.writer,
+    try parseAndPrint(alloc, html_bytes);
+}
+
+fn parseAndPrint(alloc: std.mem.Allocator, html_bytes: []const u8) !void {
+    // Extracted text is never larger than raw HTML + 1 NUL byte; avoid over-allocating 512 KB for small pages.
+    const title_cap: usize = @max(@as(usize, 1), @min(@as(usize, 1024), html_bytes.len + 1));
+    const text_cap: usize = html_bytes.len + 1;
+
+    const title_buf = try alloc.alloc(u8, title_cap);
+    const text_buf = try alloc.alloc(u8, text_cap);
+
+    const stats = cpp_parse_document(
+        html_bytes.ptr,
+        html_bytes.len,
+        title_buf.ptr,
+        title_buf.len,
+        text_buf.ptr,
+        text_buf.len,
+    );
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    try stdout.print(
+        \\Title   : {s}
+        \\Links   : {d} | Scripts: {d} | ParseTime: {d} us
+        \\Text    : {s}
+        \\
+    , .{
+        title_buf[0..stats.title_len],
+        stats.link_count,
+        stats.script_count,
+        stats.parse_us,
+        text_buf[0..stats.text_len],
     });
-    if (res.status != .ok) {
-        std.debug.print("HTTP Status: {d}\n", .{@intFromEnum(res.status)});
-    }
-    html_bytes = body_writer.written();
-}
-
-const title_buf = try alloc.alloc(u8, 1024);
-const reserve_len = @max(html_bytes.len + 64, @as(usize, opts.arena_kb) * 1024);
-const text_buf = try alloc.alloc(u8, reserve_len);
-
-const stats = cpp_parse_document(
-    html_bytes.ptr,
-    html_bytes.len,
-    title_buf.ptr,
-    title_buf.len,
-    text_buf.ptr,
-    text_buf.len,
-);
-
-const stdout = std.fs.File.stdout().deprecatedWriter();
-try stdout.print(
-    \\Title   : {s}
-    \\Links   : {d} | Scripts: {d} | ParseTime: {d} us
-    \\Text    : {s}
-    \\
-, .{
-    title_buf[0..stats.title_len],
-    stats.link_count,
-    stats.script_count,
-    stats.parse_us,
-    text_buf[0..stats.text_len],
-});
-
-
 }
 
 fn runCdpServer(port: u16) !void {
-const addr = try std.net.Address.parseIp("127.0.0.1", port);
-var server = try addr.listen(.{ .reuse_address = true });
-defer server.deinit();
+    const addr = try std.net.Address.parseIp("127.0.0.1", port);
+    var server = try addr.listen(.{ .reuse_address = true });
+    defer server.deinit();
 
-std.debug.print("panda-browser CDP JSON-RPC endpoint listening on 127.0.0.1:{d}\n", .{port});
+    std.debug.print("panda-browser CDP JSON-RPC endpoint listening on 127.0.0.1:{d}\n", .{port});
 
-while (true) {
-    const conn = try server.accept();
-    defer conn.stream.close();
+    while (true) {
+        const conn = try server.accept();
+        defer conn.stream.close();
 
-    var req_buf: [4096]u8 = undefined;
-    const n = try conn.stream.read(&req_buf);
-    if (n == 0) continue;
+        var req_buf: [4096]u8 = undefined;
+        const n = try conn.stream.read(&req_buf);
+        if (n == 0) continue;
 
-    const resp =
-        "HTTP/1.1 200 OK\r\n" ++
-        "Content-Type: application/json\r\n" ++
-        "Connection: close\r\n\r\n" ++
-        "{\"Browser\":\"panda-browser/1.0 (Zig+C++20)\",\"Protocol-Version\":\"1.3\"}\n";
-    _ = try conn.stream.writeAll(resp);
+        const req = req_buf[0..n];
+        var body_buf: [512]u8 = undefined;
+        var resp_buf: [768]u8 = undefined;
+
+        const is_list = std.mem.startsWith(u8, req, "GET /json/list") or
+            std.mem.startsWith(u8, req, "GET /json ");
+        const is_version = std.mem.startsWith(u8, req, "GET /json/version") or
+            std.mem.startsWith(u8, req, "GET / ");
+
+        if (is_list) {
+            const body = try std.fmt.bufPrint(
+                &body_buf,
+                "[{{\"id\":\"page-1\",\"type\":\"page\",\"title\":\"about:blank\",\"url\":\"about:blank\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1:{d}/devtools/page/1\"}}]\n",
+                .{port},
+            );
+            const resp = try std.fmt.bufPrint(
+                &resp_buf,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
+                .{ body.len, body },
+            );
+            try conn.stream.writeAll(resp);
+        } else if (is_version) {
+            const body = try std.fmt.bufPrint(
+                &body_buf,
+                "{{\"Browser\":\"panda-browser/1.0 (Zig+C++20)\",\"Protocol-Version\":\"1.3\",\"User-Agent\":\"panda-browser/1.0\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1:{d}/devtools/browser/1\"}}\n",
+                .{port},
+            );
+            const resp = try std.fmt.bufPrint(
+                &resp_buf,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
+                .{ body.len, body },
+            );
+            try conn.stream.writeAll(resp);
+        } else {
+            const body = "{\"error\":\"not found\"}\n";
+            const resp = try std.fmt.bufPrint(
+                &resp_buf,
+                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
+                .{ body.len, body },
+            );
+            try conn.stream.writeAll(resp);
+        }
+    }
 }
 
+test "cpp_parse_document extracts title, links, scripts, and text" {
+    try std.testing.expectEqual(@as(i32, 0), cpp_engine_init(opts.use_simd, opts.max_pages));
+    defer cpp_engine_shutdown();
 
+    const html =
+        \\<html><head><title>Panda Test</title>
+        \\<style>body { color: red; }</style>
+        \\<script>const x = "<a href='fake'>ignored</a>";</script>
+        \\</head><body><!-- <a href="comment">hidden</a> --><p>Hello</p><p><a href="/next">World</a></p></body></html>
+    ;
+    var title_buf: [128]u8 = undefined;
+    var text_buf: [256]u8 = undefined;
+
+    const stats = cpp_parse_document(
+        html.ptr,
+        html.len,
+        &title_buf,
+        title_buf.len,
+        &text_buf,
+        text_buf.len,
+    );
+
+    try std.testing.expectEqualStrings("Panda Test", title_buf[0..stats.title_len]);
+    try std.testing.expectEqualStrings("Hello World", text_buf[0..stats.text_len]);
+    try std.testing.expectEqual(@as(usize, 1), stats.link_count);
+    try std.testing.expectEqual(@as(usize, 1), stats.script_count);
+}
+
+test "cpp_eval_script prefixes active engine tag" {
+    const src = "1 + 1";
+    var out_buf: [64]u8 = undefined;
+    const n = cpp_eval_script(src.ptr, src.len, &out_buf, out_buf.len);
+    try std.testing.expect(n > src.len);
+    try std.testing.expect(std.mem.endsWith(u8, out_buf[0..n], src));
 }
