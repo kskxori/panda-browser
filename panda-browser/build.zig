@@ -1,6 +1,6 @@
 // ============================================================================
 // FILE: panda-browser/build.zig
-// Gentoo-style USE flags, C++20 compiler flags, and target wiring (Zig 0.16+)
+// Gentoo-style USE flags, C++20 compiler flags, GUI & target wiring (Zig 0.17+)
 // ============================================================================
 const std = @import("std");
 
@@ -10,6 +10,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // 2. Gentoo-style USE flags (compile-time feature toggles)
+    const use_gui = b.option(bool, "use-gui", "Enable GTK3 + WebKitGTK desktop browser window") orelse true;
     const use_v8 = b.option(bool, "use-v8", "Link full V8 C++ JIT engine") orelse false;
     const raw_quickjs = b.option(bool, "use-quickjs", "Enable ultra-light QuickJS engine") orelse true;
     // V8 takes precedence if both flags are enabled so Zig options & C++ defines match
@@ -21,6 +22,7 @@ pub fn build(b: *std.Build) void {
     const arena_kb = b.option(u32, "arena-kb", "Default per-page arena reserve in KB") orelse 512;
 
     const options = b.addOptions();
+    options.addOption(bool, "use_gui", use_gui);
     options.addOption(bool, "use_v8", use_v8);
     options.addOption(bool, "use_quickjs", use_quickjs);
     options.addOption(bool, "use_simd", use_simd);
@@ -62,7 +64,13 @@ pub fn build(b: *std.Build) void {
         flag_count += 1;
     }
 
-    const cpp_flags = flag_buf[0..flag_count];
+    const headless_cpp_flags = flag_buf[0..flag_count];
+
+    if (use_gui) {
+        flag_buf[flag_count] = "-DUSE_GUI_WEBKIT=1";
+        flag_count += 1;
+    }
+    const app_cpp_flags = flag_buf[0..flag_count];
 
     const opt_name = @tagName(optimize);
     const should_strip = std.mem.eql(u8, opt_name, "ReleaseFast") or
@@ -84,8 +92,12 @@ pub fn build(b: *std.Build) void {
     root_mod.addOptions("build_options", options);
     root_mod.addCSourceFile(.{
         .file = b.path("src/engine_bridge.cpp"),
-        .flags = cpp_flags,
+        .flags = app_cpp_flags,
     });
+    if (use_gui) {
+        root_mod.linkSystemLibrary("gtk+-3.0", .{});
+        root_mod.linkSystemLibrary("webkit2gtk-4.1", .{});
+    }
 
     // 5. Executable definition
     const exe = b.addExecutable(.{
@@ -94,6 +106,9 @@ pub fn build(b: *std.Build) void {
     });
 
     b.installArtifact(exe);
+    if (use_gui) {
+        b.installFile("panda-browser.desktop", "share/applications/panda-browser.desktop");
+    }
 
     // `zig build run -- <args>` helper
     const run_cmd = b.addRunArtifact(exe);
@@ -108,7 +123,7 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the compiled panda-browser binary");
     run_step.dependOn(&run_cmd.step);
 
-    // `zig build test` helper
+    // `zig build test` helper (tests core engine without requiring a display server)
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -119,8 +134,12 @@ pub fn build(b: *std.Build) void {
     test_mod.addOptions("build_options", options);
     test_mod.addCSourceFile(.{
         .file = b.path("src/engine_bridge.cpp"),
-        .flags = cpp_flags,
+        .flags = headless_cpp_flags,
     });
+    if (use_gui) {
+        test_mod.linkSystemLibrary("gtk+-3.0", .{});
+        test_mod.linkSystemLibrary("webkit2gtk-4.1", .{});
+    }
 
     const unit_tests = b.addTest(.{
         .root_module = test_mod,
