@@ -406,6 +406,18 @@ void load_user_input(WebKitWebView* view, const char* raw) {
         return;
     }
 
+    // Local filesystem paths (e.g. opened via desktop MIME handler) -> file:// URI
+    if (sv.front() == '/') {
+        gchar* path = g_strndup(sv.data(), sv.size());
+        gchar* file_uri = g_filename_to_uri(path, nullptr, nullptr);
+        if (file_uri) {
+            webkit_web_view_load_uri(view, file_uri);
+            g_free(file_uri);
+        }
+        g_free(path);
+        return;
+    }
+
     // Domain heuristic: no whitespace and contains '.' or local loopback address
     const bool has_space = (sv.find(' ') != std::string_view::npos);
     const bool looks_like_host = !has_space &&
