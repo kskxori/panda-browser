@@ -667,7 +667,7 @@ void on_web_process_terminated(
     const char* msg = "The renderer process stopped unexpectedly.";
     if (reason == WEBKIT_WEB_PROCESS_TERMINATED_BY_API) {
         return;
-    } else if (reason == WEBKIT_WEB_PROCESS_TERMINATED_EXCEEDED_MEMORY_LIMIT) {
+    } else if (reason == WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT) {
         msg = "This tab exceeded its memory limit and was closed to protect system RAM.";
     }
     show_error_page(view, "Tab Renderer Stopped", webkit_web_view_get_uri(view), msg);
@@ -1171,9 +1171,8 @@ void init_web_context(PandaBrowserUI* ui) {
     ui->web_context = webkit_web_context_new_with_website_data_manager(data_mgr);
     g_object_unref(data_mgr);
 
-    // Low-RAM balanced cache & isolated multi-process model
+    // Low-RAM balanced cache (multiple secondary processes is the default in WebKitGTK 2.40+)
     webkit_web_context_set_cache_model(ui->web_context, WEBKIT_CACHE_MODEL_DOCUMENT_BROWSER);
-    webkit_web_context_set_process_model(ui->web_context, WEBKIT_PROCESS_MODEL_MULTIPLE_SECONDARY_PROCESSES);
 
     WebKitCookieManager* cm = webkit_web_context_get_cookie_manager(ui->web_context);
     gchar* cookie_path = g_build_filename(data_dir, "cookies.sqlite", nullptr);
