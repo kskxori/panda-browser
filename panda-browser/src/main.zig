@@ -45,7 +45,8 @@ fn looksLikeGuiTarget(arg: []const u8) bool {
     if (arg.len == 0 or arg[0] == '<' or arg[0] == '-') {
         return false;
     }
-    if (std.mem.startsWith(u8, arg, "http://") or
+    if (arg[0] == '/' or
+        std.mem.startsWith(u8, arg, "http://") or
         std.mem.startsWith(u8, arg, "https://") or
         std.mem.startsWith(u8, arg, "file://") or
         std.mem.startsWith(u8, arg, "about:"))
@@ -74,9 +75,9 @@ pub fn main(init: std.process.Init) !void {
     }
     defer cpp_engine_shutdown();
 
-    // No arguments (e.g. desktop launcher or bare `panda-browser`):
+    // No arguments (or empty %u passed by a desktop launcher):
     // open the full GUI window if enabled, otherwise show build info.
-    if (args.len < 2) {
+    if (args.len < 2 or (comptime opts.use_gui and args[1].len == 0)) {
         if (comptime opts.use_gui) {
             if (cpp_launch_gui("https://duckduckgo.com") != 0) {
                 return error.GuiLaunchFailed;
@@ -97,7 +98,7 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("Error: Recompile with -Duse-gui=true to enable GUI mode.\n", .{});
             return;
         } else {
-            const url: [*:0]const u8 = if (args.len >= 3) args[2].ptr else "https://duckduckgo.com";
+            const url: [*:0]const u8 = if (args.len >= 3 and args[2].len > 0) args[2].ptr else "https://duckduckgo.com";
             if (cpp_launch_gui(url) != 0) {
                 return error.GuiLaunchFailed;
             }
@@ -143,7 +144,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // If GUI is enabled and user passed a URL or domain (e.g. `panda-browser youtube.com`),
+    // If GUI is enabled and user/launcher passed a URL, domain, or file path,
     // open it directly in the browser window.
     if (comptime opts.use_gui) {
         if (looksLikeGuiTarget(args[1])) {
