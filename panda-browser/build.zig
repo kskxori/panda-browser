@@ -107,7 +107,43 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
     if (use_gui) {
-        b.installFile("panda-browser.desktop", "share/applications/panda-browser.desktop");
+        // Resolve the full installed binary path (e.g. ~/.local/bin/panda-browser)
+        // so desktop launchers work even when ~/.local/bin is not in the GUI session PATH.
+        const installed_bin = b.getInstallPath(.bin, "panda-browser");
+        var has_space = false;
+        for (installed_bin) |ch| {
+            if (ch == ' ') {
+                has_space = true;
+                break;
+            }
+        }
+        const exec_line = if (has_space)
+            b.fmt("Exec=\"{s}\" %u", .{installed_bin})
+        else
+            b.fmt("Exec={s} %u", .{installed_bin});
+
+        const desktop_contents = b.fmt(
+            \\[Desktop Entry]
+            \\Version=1.0
+            \\Type=Application
+            \\Name=Panda Browser
+            \\GenericName=Web Browser
+            \\Comment=Lightweight Zig + C++20 + WebKitGTK Browser
+            \\TryExec={s}
+            \\{s}
+            \\Icon=web-browser
+            \\Terminal=false
+            \\Categories=Network;WebBrowser;
+            \\MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+            \\StartupNotify=true
+            \\StartupWMClass=panda-browser
+            \\
+        , .{ installed_bin, exec_line });
+
+        const wf = b.addWriteFiles();
+        const desktop_file = wf.add("panda-browser.desktop", desktop_contents);
+        const install_desktop = b.addInstallFile(desktop_file, "share/applications/panda-browser.desktop");
+        b.getInstallStep().dependOn(&install_desktop.step);
     }
 
     // `zig build run -- <args>` helper
