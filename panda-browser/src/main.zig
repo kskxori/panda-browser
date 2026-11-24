@@ -41,6 +41,25 @@ extern fn cpp_eval_script(
 extern fn cpp_launch_gui(initial_url: [*:0]const u8) i32;
 extern fn cpp_engine_shutdown() void;
 
+fn looksLikeGuiTarget(arg: []const u8) bool {
+    if (arg.len == 0 or arg[0] == '<' or arg[0] == '-') {
+        return false;
+    }
+    if (std.mem.startsWith(u8, arg, "http://") or
+        std.mem.startsWith(u8, arg, "https://") or
+        std.mem.startsWith(u8, arg, "file://") or
+        std.mem.startsWith(u8, arg, "about:"))
+    {
+        return true;
+    }
+    const has_space = std.mem.indexOfScalar(u8, arg, ' ') != null;
+    if (has_space) {
+        return false;
+    }
+    return std.mem.indexOfScalar(u8, arg, '.') != null or
+        std.mem.startsWith(u8, arg, "localhost");
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const base_alloc = init.gpa;
@@ -120,13 +139,10 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // If GUI is enabled and user passed a URL (e.g. `panda-browser https://archlinux.org`
-    // or clicked a link via desktop MIME handler), open it in the browser window.
+    // If GUI is enabled and user passed a URL or domain (e.g. `panda-browser youtube.com`),
+    // open it directly in the browser window.
     if (comptime opts.use_gui) {
-        const is_url = std.mem.startsWith(u8, args[1], "http://") or
-            std.mem.startsWith(u8, args[1], "https://") or
-            std.mem.startsWith(u8, args[1], "file://");
-        if (is_url) {
+        if (looksLikeGuiTarget(args[1])) {
             if (cpp_launch_gui(args[1].ptr) != 0) {
                 return error.GuiLaunchFailed;
             }
@@ -146,8 +162,8 @@ fn printBuildInfo(io: std.Io) void {
         \\panda-browser (Zig + C++20 Hybrid Browser Engine)
         \\Active Gentoo-Style USE Flags:
         \\  use-gui     : {}
-        \\  use-quickjs : {}
-        \\  use-v8      : {}
+        \\  use-quickjs : {} (headless --eval tag; GUI uses WebKit JavaScriptCore)
+        \\  use-v8      : {} (headless --eval tag; GUI uses WebKit JavaScriptCore)
         \\  use-simd    : {}
         \\  use-cdp     : {}
         \\  use-net     : {}
@@ -226,8 +242,19 @@ fn processTargetPage(io: std.Io, base_alloc: std.mem.Allocator, target: []const 
             var body_writer: std.Io.Writer.Allocating = .init(alloc);
             defer body_writer.deinit();
 
+            const extra_headers = &[_]std.http.Header{
+                .{ .name = "Accept", .value = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" },
+                .{ .name = "Accept-Language", .value = "en-US,en;q=0.9" },
+            };
+
             const res = try client.fetch(.{
                 .location = .{ .url = target },
+                .headers = .{
+                    .user_agent = .{
+                        .override = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+                    },
+                },
+                .extra_headers = extra_headers,
                 .response_writer = &body_writer.writer,
             });
             if (res.status != .ok) {
