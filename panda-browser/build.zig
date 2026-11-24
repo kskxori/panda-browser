@@ -1,19 +1,17 @@
 // ============================================================================
 // FILE: panda-browser/build.zig
-// Gentoo-style USE flags, C++20 compiler flags, GUI & target wiring (Zig 0.17+)
+// v2.00.00 Gentoo-style USE flags, modular C++20 sources, desktop + icon install
 // ============================================================================
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    // 1. Gentoo-style target & CFLAGS (-Dcpu=native -Doptimize=ReleaseFast)
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // 2. Gentoo-style USE flags (compile-time feature toggles)
+    // Gentoo-style USE flags (compile-time feature toggles)
     const use_gui = b.option(bool, "use-gui", "Enable GTK3 + WebKitGTK desktop browser window") orelse true;
     const use_v8 = b.option(bool, "use-v8", "Link full V8 C++ JIT engine") orelse false;
     const raw_quickjs = b.option(bool, "use-quickjs", "Enable ultra-light QuickJS engine") orelse true;
-    // V8 takes precedence if both flags are enabled so Zig options & C++ defines match
     const use_quickjs = raw_quickjs and !use_v8;
     const use_simd = b.option(bool, "use-simd", "Enable C++20 vectorized/SIMD HTML scanner") orelse true;
     const use_cdp = b.option(bool, "use-cdp", "Compile Chrome DevTools Protocol (CDP) server") orelse true;
@@ -31,7 +29,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(u32, "max_pages", max_pages);
     options.addOption(u32, "arena_kb", arena_kb);
 
-    // 3. Assemble C++20 flags on a stack buffer
+    // Assemble C++20 flags on a stack buffer
     var flag_buf: [16][]const u8 = undefined;
     var flag_count: usize = 0;
 
@@ -80,7 +78,7 @@ pub fn build(b: *std.Build) void {
         std.mem.eql(u8, opt_name, "release_fast") or
         std.mem.eql(u8, opt_name, "release_small");
 
-    // 4. Root module configuration (Zig 0.16+ Module API)
+    // Root module configuration (Zig 0.16+ Module API)
     const root_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -95,11 +93,22 @@ pub fn build(b: *std.Build) void {
         .flags = app_cpp_flags,
     });
     if (use_gui) {
+        root_mod.addCSourceFile(.{
+            .file = b.path("src/profile_store.cpp"),
+            .flags = app_cpp_flags,
+        });
+        root_mod.addCSourceFile(.{
+            .file = b.path("src/content_blocker.cpp"),
+            .flags = app_cpp_flags,
+        });
+        root_mod.addCSourceFile(.{
+            .file = b.path("src/browser_ui.cpp"),
+            .flags = app_cpp_flags,
+        });
         root_mod.linkSystemLibrary("gtk+-3.0", .{});
         root_mod.linkSystemLibrary("webkit2gtk-4.1", .{});
     }
 
-    // 5. Executable definition
     const exe = b.addExecutable(.{
         .name = "panda-browser",
         .root_module = root_mod,
@@ -107,8 +116,6 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
     if (use_gui) {
-        // Resolve the full installed binary path (e.g. ~/.local/bin/panda-browser)
-        // so desktop launchers work even when ~/.local/bin is not in the GUI session PATH.
         const installed_bin = b.getInstallPath(.bin, "panda-browser");
         var has_space = false;
         for (installed_bin) |ch| {
@@ -128,10 +135,10 @@ pub fn build(b: *std.Build) void {
             \\Type=Application
             \\Name=Panda Browser
             \\GenericName=Web Browser
-            \\Comment=Lightweight Zig + C++20 + WebKitGTK Browser
+            \\Comment=Lightweight Zig + C++20 + WebKitGTK Browser (v2.00.00)
             \\TryExec={s}
             \\{s}
-            \\Icon=web-browser
+            \\Icon=panda-browser
             \\Terminal=false
             \\Categories=Network;WebBrowser;
             \\MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
@@ -144,6 +151,8 @@ pub fn build(b: *std.Build) void {
         const desktop_file = wf.add("panda-browser.desktop", desktop_contents);
         const install_desktop = b.addInstallFile(desktop_file, "share/applications/panda-browser.desktop");
         b.getInstallStep().dependOn(&install_desktop.step);
+
+        b.installFile("panda-browser.svg", "share/icons/hicolor/scalable/apps/panda-browser.svg");
     }
 
     // `zig build run -- <args>` helper
