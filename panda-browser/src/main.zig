@@ -1,9 +1,11 @@
 // ============================================================================
 // FILE: panda-browser/src/main.zig
-// Standalone Zig 0.17+ entry point: GUI window + headless ArenaAllocator CLI
+// Standalone Zig 0.17+ entry point: v2.00.00 GUI + headless ArenaAllocator CLI
 // ============================================================================
 const std = @import("std");
 const opts = @import("build_options");
+
+const app_version = "2.00.00";
 
 comptime {
     if (opts.max_pages == 0) {
@@ -49,6 +51,7 @@ fn looksLikeGuiTarget(arg: []const u8) bool {
         std.mem.startsWith(u8, arg, "http://") or
         std.mem.startsWith(u8, arg, "https://") or
         std.mem.startsWith(u8, arg, "file://") or
+        std.mem.startsWith(u8, arg, "panda://") or
         std.mem.startsWith(u8, arg, "about:"))
     {
         return true;
@@ -75,16 +78,24 @@ pub fn main(init: std.process.Init) !void {
     }
     defer cpp_engine_shutdown();
 
-    // No arguments (or empty %u passed by a desktop launcher):
-    // open the full GUI window if enabled, otherwise show build info.
+    // No arguments (or empty %u from desktop launcher): open GUI window (restoring session / panda://home)
     if (args.len < 2 or (comptime opts.use_gui and args[1].len == 0)) {
         if (comptime opts.use_gui) {
-            if (cpp_launch_gui("https://duckduckgo.com") != 0) {
+            if (cpp_launch_gui("") != 0) {
                 return error.GuiLaunchFailed;
             }
         } else {
             printBuildInfo(io);
         }
+        return;
+    }
+
+    if (std.mem.eql(u8, args[1], "--version") or std.mem.eql(u8, args[1], "-v")) {
+        var buf: [128]u8 = undefined;
+        var stdout_writer = std.Io.File.stdout().writerStreaming(io, &buf);
+        const out = &stdout_writer.interface;
+        try out.print("panda-browser {s}\n", .{app_version});
+        try out.flush();
         return;
     }
 
@@ -98,7 +109,7 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("Error: Recompile with -Duse-gui=true to enable GUI mode.\n", .{});
             return;
         } else {
-            const url: [*:0]const u8 = if (args.len >= 3 and args[2].len > 0) args[2].ptr else "https://duckduckgo.com";
+            const url: [*:0]const u8 = if (args.len >= 3 and args[2].len > 0) args[2].ptr else "";
             if (cpp_launch_gui(url) != 0) {
                 return error.GuiLaunchFailed;
             }
@@ -144,8 +155,6 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // If GUI is enabled and user/launcher passed a URL, domain, or file path,
-    // open it directly in the browser window.
     if (comptime opts.use_gui) {
         if (looksLikeGuiTarget(args[1])) {
             if (cpp_launch_gui(args[1].ptr) != 0) {
@@ -164,7 +173,7 @@ fn printBuildInfo(io: std.Io) void {
     const out = &stdout_writer.interface;
 
     out.print(
-        \\panda-browser (Zig + C++20 Hybrid Browser Engine)
+        \\panda-browser v{s} (Zig + C++20 Hybrid Browser Engine)
         \\Active Gentoo-Style USE Flags:
         \\  use-gui     : {}
         \\  use-quickjs : {} (headless --eval tag; GUI uses WebKit JavaScriptCore)
@@ -183,8 +192,10 @@ fn printBuildInfo(io: std.Io) void {
         \\  panda-browser --file page.html     (parse local HTML file headlessly)
         \\  panda-browser --eval "1 + 1"
         \\  panda-browser --cdp 9222
+        \\  panda-browser --version
         \\
     , .{
+        app_version,
         opts.use_gui,
         opts.use_quickjs,
         opts.use_v8,
@@ -220,13 +231,12 @@ fn processFileTarget(io: std.Io, base_alloc: std.mem.Allocator, file_path: []con
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const max_bytes: usize = @as(usize, opts.arena_kb) * 1024 * 16; // Hard safety cap (16x arena_kb)
+    const max_bytes: usize = @as(usize, opts.arena_kb) * 1024 * 16;
     const html_bytes = try std.Io.Dir.cwd().readFileAlloc(io, file_path, alloc, .limited(max_bytes));
     try parseAndPrint(io, alloc, html_bytes);
 }
 
 fn processTargetPage(io: std.Io, base_alloc: std.mem.Allocator, target: []const u8) !void {
-    // Per-page ArenaAllocator: everything allocated for this page is freed at once
     var arena = std.heap.ArenaAllocator.init(base_alloc);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -269,7 +279,6 @@ fn processTargetPage(io: std.Io, base_alloc: std.mem.Allocator, target: []const 
 }
 
 fn parseAndPrint(io: std.Io, alloc: std.mem.Allocator, html_bytes: []const u8) !void {
-    // Extracted text is never larger than raw HTML + 1 NUL byte; avoid over-allocating 512 KB for small pages.
     const title_cap: usize = @max(@as(usize, 1), @min(@as(usize, 1024), html_bytes.len + 1));
     const text_cap: usize = html_bytes.len + 1;
 
@@ -352,8 +361,8 @@ fn runCdpServer(io: std.Io, port: u16) !void {
         } else if (is_version) {
             const body = try std.fmt.bufPrint(
                 &body_buf,
-                "{{\"Browser\":\"panda-browser/1.0 (Zig+C++20)\",\"Protocol-Version\":\"1.3\",\"User-Agent\":\"panda-browser/1.0\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1:{d}/devtools/browser/1\"}}\n",
-                .{port},
+                "{{\"Browser\":\"panda-browser/{s} (Zig+C++20)\",\"Protocol-Version\":\"1.3\",\"User-Agent\":\"panda-browser/{s}\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1:{d}/devtools/browser/1\"}}\n",
+                .{ app_version, app_version, port },
             );
             const resp = try std.fmt.bufPrint(
                 &resp_buf,
