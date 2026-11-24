@@ -52,12 +52,16 @@ fn looksLikeGuiTarget(arg: []const u8) bool {
     {
         return true;
     }
-    const has_space = std.mem.indexOfScalar(u8, arg, ' ') != null;
-    if (has_space) {
-        return false;
+    var has_dot = false;
+    for (arg) |ch| {
+        if (ch == ' ') {
+            return false;
+        }
+        if (ch == '.') {
+            has_dot = true;
+        }
     }
-    return std.mem.indexOfScalar(u8, arg, '.') != null or
-        std.mem.startsWith(u8, arg, "localhost");
+    return has_dot or std.mem.startsWith(u8, arg, "localhost");
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -242,19 +246,15 @@ fn processTargetPage(io: std.Io, base_alloc: std.mem.Allocator, target: []const 
             var body_writer: std.Io.Writer.Allocating = .init(alloc);
             defer body_writer.deinit();
 
-            const extra_headers = &[_]std.http.Header{
+            const extra_headers = [_]std.http.Header{
+                .{ .name = "User-Agent", .value = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15" },
                 .{ .name = "Accept", .value = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" },
                 .{ .name = "Accept-Language", .value = "en-US,en;q=0.9" },
             };
 
             const res = try client.fetch(.{
                 .location = .{ .url = target },
-                .headers = .{
-                    .user_agent = .{
-                        .override = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
-                    },
-                },
-                .extra_headers = extra_headers,
+                .extra_headers = &extra_headers,
                 .response_writer = &body_writer.writer,
             });
             if (res.status != .ok) {
