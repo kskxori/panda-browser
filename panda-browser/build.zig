@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
     const use_simd = b.option(bool, "use-simd", "Enable C++20 vectorized/SIMD HTML scanner") orelse true;
     const use_cdp = b.option(bool, "use-cdp", "Compile Chrome DevTools Protocol (CDP) server") orelse true;
     const use_net = b.option(bool, "use-net", "Enable native HTTP/HTTPS page fetcher") orelse true;
-    const max_pages = b.option(u32, "max-pages", "Compile-time limit on concurrent page arenas") orelse 64;
+    const max_pages = b.option(u32, "max-pages", "Compile-time limit on concurrent page arenas/tabs") orelse 64;
     const arena_kb = b.option(u32, "arena-kb", "Default per-page arena reserve in KB") orelse 512;
 
     const options = b.addOptions();
@@ -123,7 +123,7 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the compiled panda-browser binary");
     run_step.dependOn(&run_cmd.step);
 
-    // `zig build test` helper (tests core engine without requiring a display server)
+    // `zig build test` helper (decoupled from GTK/WebKit so headless tests run without GUI libs)
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -136,10 +136,6 @@ pub fn build(b: *std.Build) void {
         .file = b.path("src/engine_bridge.cpp"),
         .flags = headless_cpp_flags,
     });
-    if (use_gui) {
-        test_mod.linkSystemLibrary("gtk+-3.0", .{});
-        test_mod.linkSystemLibrary("webkit2gtk-4.1", .{});
-    }
 
     const unit_tests = b.addTest(.{
         .root_module = test_mod,
