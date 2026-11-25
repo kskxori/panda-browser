@@ -72,6 +72,13 @@ struct PasswordEntry {
     int64_t updated_at = 0;
 };
 
+struct SitePref {
+    std::string host;
+    int shield_mode = -1; // -1 = follow global, 0 = force OFF, 1 = force ON
+    int dark_mode = -1;   // -1 = follow global, 0 = force OFF, 1 = force ON
+    double zoom_level = 1.0;
+};
+
 struct MemoryStats {
     uint64_t ui_rss_kb = 0;
     uint64_t total_rss_kb = 0;
@@ -98,19 +105,23 @@ public:
     void upsert_history(std::vector<HistoryItem>& cache, const std::string& title, const std::string& url) const;
     void append_history(const std::string& title, const std::string& url) const;
     void clear_history() const;
+    void clear_history_since(std::vector<HistoryItem>& cache, int64_t cutoff_epoch) const;
 
     std::vector<SessionTab> load_session() const;
     void save_session(const std::vector<SessionTab>& tabs) const;
 
     std::vector<PasswordEntry> load_passwords() const;
     bool save_passwords(const std::vector<PasswordEntry>& entries) const;
+
     std::vector<std::string> load_never_save_origins() const;
     void add_never_save_origin(const std::string& origin) const;
+
+    std::vector<SitePref> load_site_prefs() const;
+    void save_site_prefs(const std::vector<SitePref>& prefs) const;
 
     std::string read_optional_file(const std::string& path) const;
     std::string build_search_url(SearchEngine engine, const std::string& query) const;
     const char* user_agent_string(UserAgentPreset preset) const noexcept;
-
     MemoryStats sample_memory_stats() const;
 
 private:
