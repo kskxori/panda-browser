@@ -2,6 +2,7 @@
 // FILE: panda-browser/build.zig
 // v2.00.00 Gentoo-style USE flags, modular C++20 sources, desktop + icon install
 // ============================================================================
+
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
@@ -68,6 +69,7 @@ pub fn build(b: *std.Build) void {
         flag_buf[flag_count] = "-DUSE_GUI_WEBKIT=1";
         flag_count += 1;
     }
+
     const app_cpp_flags = flag_buf[0..flag_count];
 
     const opt_name = @tagName(optimize);
@@ -78,7 +80,7 @@ pub fn build(b: *std.Build) void {
         std.mem.eql(u8, opt_name, "release_fast") or
         std.mem.eql(u8, opt_name, "release_small");
 
-    // Root module configuration (Zig 0.16+ Module API)
+    // Root module configuration (Zig 0.16+ / 0.17+ Module API)
     const root_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -92,6 +94,7 @@ pub fn build(b: *std.Build) void {
         .file = b.path("src/engine_bridge.cpp"),
         .flags = app_cpp_flags,
     });
+
     if (use_gui) {
         root_mod.addCSourceFile(.{
             .file = b.path("src/profile_store.cpp"),
@@ -113,44 +116,95 @@ pub fn build(b: *std.Build) void {
         .name = "panda-browser",
         .root_module = root_mod,
     });
-
     b.installArtifact(exe);
+
     if (use_gui) {
-        const installed_bin = b.getInstallPath(.bin, "panda-browser");
-        var has_space = false;
-        for (installed_bin) |ch| {
-            if (ch == ' ') {
-                has_space = true;
-                break;
+        if (comptime @hasDecl(std.Build, "getInstallPath")) {
+            const installed_bin = b.getInstallPath(.bin, "panda-browser");
+            var has_space = false;
+            for (installed_bin) |ch| {
+                if (ch == ' ') {
+                    has_space = true;
+                    break;
+                }
             }
+            const exec_line = if (has_space)
+                b.fmt("Exec=\"{s}\" %u", .{installed_bin})
+            else
+                b.fmt("Exec={s} %u", .{installed_bin});
+
+            const desktop_contents = b.fmt(
+                \\[Desktop Entry]
+                \\Version=1.0
+                \\Type=Application
+                \\Name=Panda Browser
+                \\GenericName=Web Browser
+                \\Comment=Lightweight Zig + C++20 + WebKitGTK Browser (v2.00.00)
+                \\TryExec={s}
+                \\{s}
+                \\Icon=panda-browser
+                \\Terminal=false
+                \\Categories=Network;WebBrowser;
+                \\MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+                \\StartupNotify=true
+                \\StartupWMClass=panda-browser
+                \\
+            , .{ installed_bin, exec_line });
+
+            const wf = b.addWriteFiles();
+            const desktop_file = wf.add("panda-browser.desktop", desktop_contents);
+            const install_desktop = b.addInstallFile(desktop_file, "share/applications/panda-browser.desktop");
+            b.getInstallStep().dependOn(&install_desktop.step);
+        } else {
+            // Zig 0.17+: resolve deployed bin path lazily at make time
+            const bin_base: std.Build.Configuration.LazyPath.Relative.Base =
+                if (@hasField(std.Build.Configuration.LazyPath.Relative.Base, "deployed_bin"))
+                    .deployed_bin
+                else
+                    .install_bin;
+
+            const deployed_bin_lp: std.Build.LazyPath = .{
+                .relative = .{
+                    .base = bin_base,
+                    .sub_path = "panda-browser",
+                },
+            };
+
+            const desktop_script =
+                \\bin_path="$1"
+                \\out_path="$2"
+                \\case "$bin_path" in
+                \\  *" "*) exec_line="Exec=\"$bin_path\" %u" ;;
+                \\  *)     exec_line="Exec=$bin_path %u" ;;
+                \\esac
+                \\printf '%s\n' \
+                \\  '[Desktop Entry]' \
+                \\  'Version=1.0' \
+                \\  'Type=Application' \
+                \\  'Name=Panda Browser' \
+                \\  'GenericName=Web Browser' \
+                \\  'Comment=Lightweight Zig + C++20 + WebKitGTK Browser (v2.00.00)' \
+                \\  "TryExec=$bin_path" \
+                \\  "$exec_line" \
+                \\  'Icon=panda-browser' \
+                \\  'Terminal=false' \
+                \\  'Categories=Network;WebBrowser;' \
+                \\  'MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;' \
+                \\  'StartupNotify=true' \
+                \\  'StartupWMClass=panda-browser' > "$out_path"
+            ;
+
+            const gen_desktop = b.addSystemCommand(&.{
+                "/bin/sh",
+                "-c",
+                desktop_script,
+                "gen-desktop",
+            });
+            gen_desktop.addDirectoryArg2(deployed_bin_lp, .{ .make_absolute = true });
+            const desktop_file = gen_desktop.addOutputFileArg2("panda-browser.desktop", .{});
+            const install_desktop = b.addInstallFile(desktop_file, "share/applications/panda-browser.desktop");
+            b.getInstallStep().dependOn(&install_desktop.step);
         }
-        const exec_line = if (has_space)
-            b.fmt("Exec=\"{s}\" %u", .{installed_bin})
-        else
-            b.fmt("Exec={s} %u", .{installed_bin});
-
-        const desktop_contents = b.fmt(
-            \\[Desktop Entry]
-            \\Version=1.0
-            \\Type=Application
-            \\Name=Panda Browser
-            \\GenericName=Web Browser
-            \\Comment=Lightweight Zig + C++20 + WebKitGTK Browser (v2.00.00)
-            \\TryExec={s}
-            \\{s}
-            \\Icon=panda-browser
-            \\Terminal=false
-            \\Categories=Network;WebBrowser;
-            \\MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
-            \\StartupNotify=true
-            \\StartupWMClass=panda-browser
-            \\
-        , .{ installed_bin, exec_line });
-
-        const wf = b.addWriteFiles();
-        const desktop_file = wf.add("panda-browser.desktop", desktop_contents);
-        const install_desktop = b.addInstallFile(desktop_file, "share/applications/panda-browser.desktop");
-        b.getInstallStep().dependOn(&install_desktop.step);
 
         b.installFile("panda-browser.svg", "share/icons/hicolor/scalable/apps/panda-browser.svg");
     }
@@ -165,6 +219,7 @@ pub fn build(b: *std.Build) void {
     } else {
         run_cmd.addPassthruArgs();
     }
+
     const run_step = b.step("run", "Run the compiled panda-browser binary");
     run_step.dependOn(&run_cmd.step);
 
