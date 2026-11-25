@@ -1,8 +1,3 @@
-// ============================================================================
-// FILE: panda-browser/build.zig
-// v2.00.00 Gentoo-style USE flags, modular C++20 sources, desktop + icon install
-// ============================================================================
-
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
@@ -105,6 +100,14 @@ pub fn build(b: *std.Build) void {
             .flags = app_cpp_flags,
         });
         root_mod.addCSourceFile(.{
+            .file = b.path("src/browser_pages.cpp"),
+            .flags = app_cpp_flags,
+        });
+        root_mod.addCSourceFile(.{
+            .file = b.path("src/browser_dialogs.cpp"),
+            .flags = app_cpp_flags,
+        });
+        root_mod.addCSourceFile(.{
             .file = b.path("src/browser_ui.cpp"),
             .flags = app_cpp_flags,
         });
@@ -139,7 +142,7 @@ pub fn build(b: *std.Build) void {
                 \\Type=Application
                 \\Name=Panda Browser
                 \\GenericName=Web Browser
-                \\Comment=Lightweight Zig + C++20 + WebKitGTK Browser (v2.00.00)
+                \\Comment=Lightweight Zig + C++20 + WebKitGTK Browser
                 \\TryExec={s}
                 \\{s}
                 \\Icon=panda-browser
