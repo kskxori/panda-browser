@@ -2,6 +2,7 @@
 // FILE: panda-browser/src/main.zig
 // Standalone Zig 0.17+ entry point: v2.00.00 GUI + headless ArenaAllocator CLI
 // ============================================================================
+
 const std = @import("std");
 const opts = @import("build_options");
 
@@ -79,7 +80,7 @@ pub fn main(init: std.process.Init) !void {
     defer cpp_engine_shutdown();
 
     // No arguments (or empty %u from desktop launcher): open GUI window (restoring session / panda://home)
-    if (args.len < 2 or (comptime opts.use_gui and args[1].len == 0)) {
+    if (args.len < 2 or (opts.use_gui and args[1].len == 0)) {
         if (comptime opts.use_gui) {
             if (cpp_launch_gui("") != 0) {
                 return error.GuiLaunchFailed;
