@@ -183,7 +183,7 @@ pub fn build(b: *std.Build) void {
                 \\  'Type=Application' \
                 \\  'Name=Panda Browser' \
                 \\  'GenericName=Web Browser' \
-                \\  'Comment=Lightweight Zig + C++20 + WebKitGTK Browser (v2.00.00)' \
+                \\  'Comment=Lightweight Zig + C++20 + WebKitGTK Browser' \
                 \\  "TryExec=$bin_path" \
                 \\  "$exec_line" \
                 \\  'Icon=panda-browser' \
