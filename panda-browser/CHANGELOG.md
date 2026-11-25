@@ -5,6 +5,30 @@ Versioning follows `vMAJOR.MINOR.PATCH` (`v2.xx.xx`).
 
 ---
 
+## [v2.02.00] - 2026-11-25
+
+### Added
+- **Padlock / Site Info Popover & Per-Site Overrides**:
+  - Clickable padlock/status icon inside the URL bar showing HTTPS/HTTP/internal connection status.
+  - Per-site override controls for **Ad & Tracker Shield** and **Force Dark Mode** (`Global Default`, `Always ON`, `OFF`), persisted in `site_prefs.tsv`.
+  - One-click **Clear Cookies & Site Data** button for the current website only.
+- **Clear Browsing Data Dialog**:
+  - Accessible from Preferences (`Ctrl+,`), `panda://history`, and Command Palette (`Ctrl+Shift+P`).
+  - Clear browsing history, cached files/images, and cookies/site storage across **Last Hour**, **Last 24 Hours**, or **All Time** without deleting saved vault passwords.
+- **WebKit Memory Pressure Tuning**:
+  - Configured `WebKitMemoryPressureSettings` for web and network processes based on your active Cache Profile (`Ultra-Low RAM`, `Balanced`, `Fast`) to reclaim JS and image caches proactively.
+- **Daily QoL Upgrades**:
+  - **Per-Site Zoom Memory**: Automatically saves and restores zoom levels (`Ctrl++`, `Ctrl+-`, `Ctrl+0`, or Site Info popover) per website.
+  - **Print / Save as PDF (`Ctrl+P`)**: Native WebKit print and PDF export dialog, also available in the Command Palette.
+  - **Clickable Downloads Popover**: Status bar `Downloads` popover showing live progress, completion status, one-click file launch, and folder reveal.
+  - **Mouse Back/Forward Side Buttons**: Hardware mouse buttons 8 and 9 now navigate Back and Forward across both web pages and internal `panda://` pages.
+
+### Changed
+- Cleaned up UI subtitles by removing `v2.00.00 · Instant Native Home · Low-RAM WebKitGTK` from normal `panda://home` tabs, `v2.00.00` from the Preferences window title, and `(v2.00.00)` from the desktop launcher `Comment=`.
+- Split `browser_ui.cpp` cleanly into `browser_state.hpp`, `browser_pages.cpp`, `browser_dialogs.cpp`, and `browser_ui.cpp` for faster incremental builds.
+
+---
+
 ## [v2.01.00] - 2026-11-25
 
 ### Added
