@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -422,6 +423,21 @@ void ProfileStore::clear_history() const {
     g_file_set_contents(path.c_str(), "", 0, nullptr);
 }
 
+void ProfileStore::clear_history_since(std::vector<HistoryItem>& cache, int64_t cutoff_epoch) const {
+    if (cutoff_epoch <= 0) {
+        cache.clear();
+        clear_history();
+        return;
+    }
+    cache.erase(
+        std::remove_if(cache.begin(), cache.end(), [cutoff_epoch](const HistoryItem& h) {
+            return h.timestamp >= cutoff_epoch;
+        }),
+        cache.end()
+    );
+    save_history(cache);
+}
+
 std::vector<SessionTab> ProfileStore::load_session() const {
     std::vector<SessionTab> tabs;
     std::string raw = read_optional_file(data_dir_ + "/session.tsv");
@@ -638,6 +654,58 @@ void ProfileStore::add_never_save_origin(const std::string& origin) const {
     std::string path = data_dir_ + "/passwords_never.txt";
     g_file_set_contents(path.c_str(), out.data(), static_cast<gssize>(out.size()), nullptr);
     g_chmod(path.c_str(), 0600);
+}
+
+std::vector<SitePref> ProfileStore::load_site_prefs() const {
+    std::vector<SitePref> prefs;
+    std::string raw = read_optional_file(data_dir_ + "/site_prefs.tsv");
+    if (raw.empty()) {
+        return prefs;
+    }
+
+    size_t pos = 0;
+    while (pos < raw.size()) {
+        size_t nl = raw.find('\n', pos);
+        if (nl == std::string::npos) nl = raw.size();
+        std::string_view line(raw.data() + pos, nl - pos);
+        pos = nl + 1;
+        if (line.empty()) continue;
+
+        auto cols = split_tabs(line);
+        if (cols.size() >= 4 && !cols[0].empty()) {
+            SitePref sp;
+            sp.host = std::string(cols[0]);
+            sp.shield_mode = std::clamp(std::atoi(std::string(cols[1]).c_str()), -1, 1);
+            sp.dark_mode = std::clamp(std::atoi(std::string(cols[2]).c_str()), -1, 1);
+            const double z = g_ascii_strtod(std::string(cols[3]).c_str(), nullptr);
+            sp.zoom_level = (z >= 0.3 && z <= 3.0) ? z : 1.0;
+            prefs.push_back(std::move(sp));
+        }
+    }
+    return prefs;
+}
+
+void ProfileStore::save_site_prefs(const std::vector<SitePref>& prefs) const {
+    std::string out;
+    out.reserve(prefs.size() * 48);
+    for (const auto& sp : prefs) {
+        if (sp.host.empty()) continue;
+        if (sp.shield_mode == -1 && sp.dark_mode == -1 && std::fabs(sp.zoom_level - 1.0) < 0.01) {
+            continue;
+        }
+        char zbuf[G_ASCII_DTOSTR_BUF_SIZE];
+        g_ascii_dtostr(zbuf, sizeof(zbuf), sp.zoom_level);
+        out += sanitize_tsv(sp.host);
+        out.push_back('\t');
+        out += std::to_string(std::clamp(sp.shield_mode, -1, 1));
+        out.push_back('\t');
+        out += std::to_string(std::clamp(sp.dark_mode, -1, 1));
+        out.push_back('\t');
+        out += zbuf;
+        out.push_back('\n');
+    }
+    std::string path = data_dir_ + "/site_prefs.tsv";
+    g_file_set_contents(path.c_str(), out.data(), static_cast<gssize>(out.size()), nullptr);
 }
 
 std::string ProfileStore::read_optional_file(const std::string& path) const {
