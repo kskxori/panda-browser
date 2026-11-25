@@ -6,23 +6,31 @@ namespace panda {
 
 namespace {
 
-// Compiled natively by WebKit in C++ with near-zero RAM/CPU overhead
+// Compact WebKit native content blocker rules (runs inside WebKit C++ at 0 JS overhead)
 constexpr const char* kShieldRulesJson = R"JSON([
-  {
-    "trigger": {
-      "url-filter": "^https?://([^/]+\\.)?(doubleclick\\.net|googlesyndication\\.com|googleadservices\\.com|adservice\\.google\\.com|google-analytics\\.com|googletagmanager\\.com|scorecardresearch\\.com|taboola\\.com|outbrain\\.com|criteo\\.com|pubmatic\\.com|adnxs\\.com|quantserve\\.com|facebook\\.net|ads-twitter\\.com|hotjar\\.com|fullstory\\.com|clarity\\.ms|mixpanel\\.com|amplitude\\.com|segment\\.io|sentry\\.io|coinhive\\.com|cryptoloot\\.pro)/",
-      "load-type": ["third-party"]
-    },
-    "action": { "type": "block" }
-  }
+  {"trigger":{"url-filter":".*doubleclick\\.net.*"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":".*googlesyndication\\.com.*"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":".*googleadservices\\.com.*"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":".*google-analytics\\.com.*"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":".*googletagmanager\\.com.*"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":".*scorecardresearch\\.com.*"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":".*amazon-adsystem\\.com.*"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":".*taboola\\.com.*"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":".*outbrain\\.com.*"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":".*criteo\\.(com|net).*"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":".*pubmatic\\.com.*"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":".*rubiconproject\\.com.*"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":".*adnxs\\.com.*"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":".*hotjar\\.com.*"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":".*sentry\\.io.*"},"action":{"type":"block"}}
 ])JSON";
 
 constexpr const char* kForceDarkCss = R"CSS(
 html {
-  filter: invert(0.90) hue-rotate(180deg) !important;
+  filter: invert(0.92) hue-rotate(180deg) !important;
   background-color: #111317 !important;
 }
-img, video, picture, canvas, svg, [style*="background-image"] {
+img, video, picture, svg, canvas, [style*="background-image"] {
   filter: invert(1) hue-rotate(180deg) !important;
 }
 )CSS";
@@ -99,16 +107,49 @@ void ContentBlocker::init(
     g_free(filter_dir);
 
     cancellable_ = g_cancellable_new();
-    GBytes* rules_bytes = g_bytes_new_static(kShieldRulesJson, std::strlen(kShieldRulesJson));
-    webkit_user_content_filter_store_save(
+
+    // Load precompiled bytecode from cache first to keep startup fast
+    webkit_user_content_filter_store_load(
         filter_store_,
         "panda-v2-shield",
-        rules_bytes,
         cancellable_,
-        on_filter_saved,
+        +[](GObject* source, GAsyncResult* res, gpointer data) {
+            auto* self = static_cast<ContentBlocker*>(data);
+            GError* err = nullptr;
+            WebKitUserContentFilter* filter = webkit_user_content_filter_store_load_finish(
+                WEBKIT_USER_CONTENT_FILTER_STORE(source), res, &err
+            );
+            if (!err && filter) {
+                if (!self || !self->cancellable_ || g_cancellable_is_cancelled(self->cancellable_) || !self->notebook_) {
+                    webkit_user_content_filter_unref(filter);
+                    return;
+                }
+                if (self->shield_filter_) {
+                    webkit_user_content_filter_unref(self->shield_filter_);
+                }
+                self->shield_filter_ = filter;
+                self->apply_to_all_tabs(self->desired_shield_, self->desired_dark_);
+                return;
+            }
+            const bool cancelled = err && g_error_matches(err, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+            if (err) g_error_free(err);
+            if (cancelled || !self || !self->filter_store_ || !self->cancellable_) {
+                return;
+            }
+
+            GBytes* rules_bytes = g_bytes_new_static(kShieldRulesJson, std::strlen(kShieldRulesJson));
+            webkit_user_content_filter_store_save(
+                self->filter_store_,
+                "panda-v2-shield",
+                rules_bytes,
+                self->cancellable_,
+                ContentBlocker::on_filter_saved,
+                self
+            );
+            g_bytes_unref(rules_bytes);
+        },
         this
     );
-    g_bytes_unref(rules_bytes);
 }
 
 void ContentBlocker::shutdown() {
@@ -196,7 +237,7 @@ void ContentBlocker::apply_to_view(WebKitWebView* view, bool shield_enabled, boo
     }
 
     if (user_js_script_) {
-        webkit_user_content_manager_remove_all_scripts(ucm);
+        webkit_user_content_manager_remove_script(ucm, user_js_script_);
         webkit_user_content_manager_add_script(ucm, user_js_script_);
     }
 }
@@ -211,8 +252,12 @@ void ContentBlocker::apply_to_all_tabs(bool shield_enabled, bool force_dark) con
     const gint n = gtk_notebook_get_n_pages(GTK_NOTEBOOK(notebook_));
     for (gint i = 0; i < n; ++i) {
         GtkWidget* child = gtk_notebook_get_nth_page(GTK_NOTEBOOK(notebook_), i);
-        if (child) {
-            apply_to_view(WEBKIT_WEB_VIEW(child), shield_enabled, force_dark);
+        if (!child) continue;
+        WebKitWebView* v = WEBKIT_IS_WEB_VIEW(child)
+            ? WEBKIT_WEB_VIEW(child)
+            : static_cast<WebKitWebView*>(g_object_get_data(G_OBJECT(child), "panda-webview"));
+        if (v) {
+            apply_to_view(v, shield_enabled, force_dark);
         }
     }
 }
