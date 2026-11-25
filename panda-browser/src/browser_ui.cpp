@@ -479,7 +479,7 @@ void build_home_view(TabData* td) {
 
     const char* badge = win->is_private
         ? "Private Session · Zero Disk History or Passwords"
-        : "v2.00.00 · Instant Native Home · Low-RAM WebKitGTK";
+        : "Great Compatability · Instant Native Home · Low-RAM WebKitGTK";
     GtkWidget* sub_lbl = gtk_label_new(badge);
     gtk_widget_set_opacity(sub_lbl, 0.72);
 
