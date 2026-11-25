@@ -1,12 +1,7 @@
-// ============================================================================
-// FILE: panda-browser/src/main.zig
-// Standalone Zig 0.17+ entry point: v2.00.00 GUI + headless ArenaAllocator CLI
-// ============================================================================
-
 const std = @import("std");
 const opts = @import("build_options");
 
-const app_version = "2.00.00";
+const app_version = "2.02.00";
 
 comptime {
     if (opts.max_pages == 0) {
