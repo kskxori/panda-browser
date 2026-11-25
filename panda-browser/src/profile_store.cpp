@@ -1,8 +1,7 @@
 #include "profile_store.hpp"
 
-#include <dirent.h>
 #include <glib.h>
-#include <unistd.h>
+#include <glib/gstdio.h>
 
 #include <algorithm>
 #include <cctype>
@@ -10,11 +9,16 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <dirent.h>
+#include <fcntl.h>
 #include <string_view>
+#include <unistd.h>
 
 namespace panda {
 
 namespace {
+
+constexpr size_t kMaxHistory = 1000;
 
 std::string sanitize_tsv(std::string_view sv) {
     std::string out;
@@ -30,44 +34,50 @@ std::string sanitize_tsv(std::string_view sv) {
 }
 
 std::vector<std::string_view> split_tabs(std::string_view line) {
-    std::vector<std::string_view> parts;
+    std::vector<std::string_view> cols;
     size_t start = 0;
     while (start <= line.size()) {
-        const size_t tab = line.find('\t', start);
-        if (tab == std::string_view::npos) {
-            parts.push_back(line.substr(start));
+        size_t pos = line.find('\t', start);
+        if (pos == std::string_view::npos) {
+            cols.push_back(line.substr(start));
             break;
         }
-        parts.push_back(line.substr(start, tab - start));
-        start = tab + 1;
+        cols.push_back(line.substr(start, pos - start));
+        start = pos + 1;
     }
-    return parts;
+    return cols;
 }
 
-uint64_t read_statm_rss_kb(const char* statm_path, uint64_t page_kb) {
-    FILE* fp = std::fopen(statm_path, "r");
-    if (!fp) {
+uint64_t read_statm_rss_kb(const char* path, uint64_t page_kb) {
+    const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
         return 0;
     }
+    char buf[96];
+    const ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
+    ::close(fd);
+    if (n <= 0) {
+        return 0;
+    }
+    buf[n] = '\0';
+
     unsigned long size_pages = 0;
     unsigned long rss_pages = 0;
-    const int matched = std::fscanf(fp, "%lu %lu", &size_pages, &rss_pages);
-    std::fclose(fp);
-    if (matched != 2) {
+    if (std::sscanf(buf, "%lu %lu", &size_pages, &rss_pages) != 2) {
         return 0;
     }
     return static_cast<uint64_t>(rss_pages) * page_kb;
 }
 
 bool read_proc_ppid(const char* stat_path, pid_t& out_ppid) {
-    FILE* fp = std::fopen(stat_path, "r");
-    if (!fp) {
+    const int fd = ::open(stat_path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
         return false;
     }
-    char buf[512];
-    const size_t n = std::fread(buf, 1, sizeof(buf) - 1, fp);
-    std::fclose(fp);
-    if (n == 0) {
+    char buf[384];
+    const ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
+    ::close(fd);
+    if (n <= 0) {
         return false;
     }
     buf[n] = '\0';
@@ -95,6 +105,67 @@ bool is_numeric_name(const char* name) {
         }
     }
     return true;
+}
+
+void fill_random_bytes(uint8_t* dst, size_t len) {
+    const int fd = ::open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        size_t off = 0;
+        while (off < len) {
+            const ssize_t r = ::read(fd, dst + off, len - off);
+            if (r <= 0) break;
+            off += static_cast<size_t>(r);
+        }
+        ::close(fd);
+        if (off == len) {
+            return;
+        }
+    }
+    for (size_t i = 0; i < len; ++i) {
+        dst[i] = static_cast<uint8_t>(g_random_int() & 0xff);
+    }
+}
+
+void compute_hmac_sha256(
+    const uint8_t* key,
+    size_t key_len,
+    const uint8_t* a,
+    size_t a_len,
+    const uint8_t* b,
+    size_t b_len,
+    uint8_t out[32]
+) {
+    GHmac* hmac = g_hmac_new(G_CHECKSUM_SHA256, key, static_cast<gssize>(key_len));
+    if (a && a_len > 0) {
+        g_hmac_update(hmac, a, static_cast<gssize>(a_len));
+    }
+    if (b && b_len > 0) {
+        g_hmac_update(hmac, b, static_cast<gssize>(b_len));
+    }
+    gsize dlen = 32;
+    g_hmac_get_digest(hmac, out, &dlen);
+    g_hmac_unref(hmac);
+}
+
+void xor_keystream(const uint8_t key[32], const uint8_t nonce[16], uint8_t* data, size_t len) {
+    uint32_t counter = 0;
+    size_t offset = 0;
+    while (offset < len) {
+        uint8_t ctr_bytes[4] = {
+            static_cast<uint8_t>(counter & 0xff),
+            static_cast<uint8_t>((counter >> 8) & 0xff),
+            static_cast<uint8_t>((counter >> 16) & 0xff),
+            static_cast<uint8_t>((counter >> 24) & 0xff),
+        };
+        uint8_t block[32];
+        compute_hmac_sha256(key, 32, nonce, 16, ctr_bytes, 4, block);
+        const size_t chunk = std::min<size_t>(32, len - offset);
+        for (size_t i = 0; i < chunk; ++i) {
+            data[offset + i] ^= block[i];
+        }
+        offset += chunk;
+        ++counter;
+    }
 }
 
 } // namespace
@@ -156,6 +227,12 @@ BrowserConfig ProfileStore::load_config() const {
     if (g_key_file_has_key(kf, grp, "restore_session", nullptr)) {
         cfg.restore_session = g_key_file_get_boolean(kf, grp, "restore_session", nullptr) == TRUE;
     }
+    if (g_key_file_has_key(kf, grp, "remember_history", nullptr)) {
+        cfg.remember_history = g_key_file_get_boolean(kf, grp, "remember_history", nullptr) == TRUE;
+    }
+    if (g_key_file_has_key(kf, grp, "remember_passwords", nullptr)) {
+        cfg.remember_passwords = g_key_file_get_boolean(kf, grp, "remember_passwords", nullptr) == TRUE;
+    }
     if (g_key_file_has_key(kf, grp, "hibernate_minutes", nullptr)) {
         cfg.hibernate_minutes = std::max(0, g_key_file_get_integer(kf, grp, "hibernate_minutes", nullptr));
     }
@@ -183,6 +260,8 @@ void ProfileStore::save_config(const BrowserConfig& cfg) const {
     g_key_file_set_boolean(kf, grp, "force_dark", cfg.force_dark ? TRUE : FALSE);
     g_key_file_set_boolean(kf, grp, "show_bookmarks_bar", cfg.show_bookmarks_bar ? TRUE : FALSE);
     g_key_file_set_boolean(kf, grp, "restore_session", cfg.restore_session ? TRUE : FALSE);
+    g_key_file_set_boolean(kf, grp, "remember_history", cfg.remember_history ? TRUE : FALSE);
+    g_key_file_set_boolean(kf, grp, "remember_passwords", cfg.remember_passwords ? TRUE : FALSE);
     g_key_file_set_integer(kf, grp, "hibernate_minutes", cfg.hibernate_minutes);
     g_key_file_set_string(kf, grp, "home_url", cfg.home_url.c_str());
 
@@ -270,27 +349,8 @@ std::vector<HistoryItem> ProfileStore::load_history() const {
     return items;
 }
 
-void ProfileStore::append_history(const std::string& title, const std::string& url) const {
-    if (url.empty() || url.rfind("panda://", 0) == 0 || url.rfind("about:", 0) == 0) {
-        return;
-    }
-
-    auto items = load_history();
-    if (!items.empty() && items.back().url == url) {
-        items.back().title = title.empty() ? url : title;
-        items.back().timestamp = static_cast<int64_t>(std::time(nullptr));
-    } else {
-        items.push_back({
-            title.empty() ? url : title,
-            url,
-            static_cast<int64_t>(std::time(nullptr)),
-        });
-    }
-
-    // Cap stored history to latest 500 entries to keep memory & disk tiny
-    constexpr size_t kMaxHistory = 500;
+void ProfileStore::save_history(const std::vector<HistoryItem>& items) const {
     const size_t start = items.size() > kMaxHistory ? (items.size() - kMaxHistory) : 0;
-
     std::string out;
     out.reserve((items.size() - start) * 80);
     for (size_t i = start; i < items.size(); ++i) {
@@ -303,6 +363,58 @@ void ProfileStore::append_history(const std::string& title, const std::string& u
     }
     std::string path = data_dir_ + "/history.tsv";
     g_file_set_contents(path.c_str(), out.data(), static_cast<gssize>(out.size()), nullptr);
+}
+
+void ProfileStore::upsert_history(
+    std::vector<HistoryItem>& cache,
+    const std::string& title,
+    const std::string& url
+) const {
+    if (url.empty() || url.rfind("panda://", 0) == 0 || url.rfind("about:", 0) == 0 ||
+        url.rfind("data:", 0) == 0 || url.rfind("blob:", 0) == 0) {
+        return;
+    }
+
+    const std::string clean_title = title.empty() ? url : title;
+    const int64_t now = static_cast<int64_t>(std::time(nullptr));
+
+    if (!cache.empty() && cache.back().url == url) {
+        if (cache.back().title == clean_title) {
+            return;
+        }
+        cache.back().title = clean_title;
+        cache.back().timestamp = now;
+        save_history(cache);
+        return;
+    }
+
+    cache.push_back({clean_title, url, now});
+    if (cache.size() > kMaxHistory + 100) {
+        cache.erase(cache.begin(), cache.begin() + static_cast<ptrdiff_t>(cache.size() - kMaxHistory));
+        save_history(cache);
+        return;
+    }
+
+    // Fast single-line O_APPEND write without rewriting the whole file
+    std::string path = data_dir_ + "/history.tsv";
+    FILE* fp = std::fopen(path.c_str(), "a");
+    if (fp) {
+        std::string line = std::to_string(now);
+        line.push_back('\t');
+        line += sanitize_tsv(clean_title);
+        line.push_back('\t');
+        line += sanitize_tsv(url);
+        line.push_back('\n');
+        std::fwrite(line.data(), 1, line.size(), fp);
+        std::fclose(fp);
+    } else {
+        save_history(cache);
+    }
+}
+
+void ProfileStore::append_history(const std::string& title, const std::string& url) const {
+    auto items = load_history();
+    upsert_history(items, title, url);
 }
 
 void ProfileStore::clear_history() const {
@@ -351,6 +463,181 @@ void ProfileStore::save_session(const std::vector<SessionTab>& tabs) const {
     }
     std::string path = data_dir_ + "/session.tsv";
     g_file_set_contents(path.c_str(), out.data(), static_cast<gssize>(out.size()), nullptr);
+}
+
+bool ProfileStore::load_or_create_vault_key(uint8_t out_key[32]) const {
+    std::string key_path = data_dir_ + "/.vault.key";
+    gchar* raw = nullptr;
+    gsize raw_len = 0;
+    if (g_file_get_contents(key_path.c_str(), &raw, &raw_len, nullptr)) {
+        if (raw_len == 32) {
+            std::memcpy(out_key, raw, 32);
+            g_free(raw);
+            g_chmod(key_path.c_str(), 0600);
+            return true;
+        }
+        g_free(raw);
+    }
+
+    fill_random_bytes(out_key, 32);
+    if (!g_file_set_contents(key_path.c_str(), reinterpret_cast<const gchar*>(out_key), 32, nullptr)) {
+        return false;
+    }
+    g_chmod(key_path.c_str(), 0600);
+    return true;
+}
+
+std::string ProfileStore::encrypt_secret(const uint8_t key[32], const std::string& plaintext) const {
+    uint8_t nonce[16];
+    fill_random_bytes(nonce, sizeof(nonce));
+
+    std::vector<uint8_t> cipher(plaintext.begin(), plaintext.end());
+    if (!cipher.empty()) {
+        xor_keystream(key, nonce, cipher.data(), cipher.size());
+    }
+
+    uint8_t tag[32];
+    compute_hmac_sha256(key, 32, nonce, sizeof(nonce), cipher.data(), cipher.size(), tag);
+
+    std::vector<uint8_t> blob;
+    blob.reserve(sizeof(nonce) + sizeof(tag) + cipher.size());
+    blob.insert(blob.end(), nonce, nonce + sizeof(nonce));
+    blob.insert(blob.end(), tag, tag + sizeof(tag));
+    blob.insert(blob.end(), cipher.begin(), cipher.end());
+
+    gchar* b64 = g_base64_encode(blob.data(), blob.size());
+    std::string res = b64 ? b64 : "";
+    g_free(b64);
+    return res;
+}
+
+bool ProfileStore::decrypt_secret(const uint8_t key[32], const std::string& b64, std::string& out_plain) const {
+    gsize dec_len = 0;
+    guchar* dec = g_base64_decode(b64.c_str(), &dec_len);
+    if (!dec || dec_len < 48) {
+        g_free(dec);
+        return false;
+    }
+
+    const uint8_t* nonce = dec;
+    const uint8_t* tag = dec + 16;
+    const uint8_t* cipher = dec + 48;
+    const size_t cipher_len = dec_len - 48;
+
+    uint8_t expected[32];
+    compute_hmac_sha256(key, 32, nonce, 16, cipher, cipher_len, expected);
+
+    uint8_t diff = 0;
+    for (size_t i = 0; i < 32; ++i) {
+        diff |= static_cast<uint8_t>(tag[i] ^ expected[i]);
+    }
+    if (diff != 0) {
+        g_free(dec);
+        return false;
+    }
+
+    std::vector<uint8_t> plain(cipher, cipher + cipher_len);
+    if (!plain.empty()) {
+        xor_keystream(key, nonce, plain.data(), plain.size());
+    }
+    out_plain.assign(reinterpret_cast<const char*>(plain.data()), plain.size());
+    g_free(dec);
+    return true;
+}
+
+std::vector<PasswordEntry> ProfileStore::load_passwords() const {
+    std::vector<PasswordEntry> entries;
+    std::string raw = read_optional_file(data_dir_ + "/passwords.dat");
+    if (raw.empty()) {
+        return entries;
+    }
+
+    uint8_t key[32];
+    if (!load_or_create_vault_key(key)) {
+        return entries;
+    }
+
+    size_t pos = 0;
+    while (pos < raw.size()) {
+        size_t nl = raw.find('\n', pos);
+        if (nl == std::string::npos) nl = raw.size();
+        std::string_view line(raw.data() + pos, nl - pos);
+        pos = nl + 1;
+        if (line.empty()) continue;
+
+        auto cols = split_tabs(line);
+        if (cols.size() >= 4 && !cols[1].empty() && !cols[3].empty()) {
+            std::string decrypted;
+            if (decrypt_secret(key, std::string(cols[3]), decrypted)) {
+                PasswordEntry p;
+                p.updated_at = std::strtoll(std::string(cols[0]).c_str(), nullptr, 10);
+                p.origin = std::string(cols[1]);
+                p.username = std::string(cols[2]);
+                p.password = std::move(decrypted);
+                entries.push_back(std::move(p));
+            }
+        }
+    }
+    return entries;
+}
+
+bool ProfileStore::save_passwords(const std::vector<PasswordEntry>& entries) const {
+    uint8_t key[32];
+    if (!load_or_create_vault_key(key)) {
+        return false;
+    }
+
+    std::string out;
+    out.reserve(entries.size() * 128);
+    for (const auto& e : entries) {
+        if (e.origin.empty() || e.password.empty()) continue;
+        out += std::to_string(e.updated_at);
+        out.push_back('\t');
+        out += sanitize_tsv(e.origin);
+        out.push_back('\t');
+        out += sanitize_tsv(e.username);
+        out.push_back('\t');
+        out += encrypt_secret(key, e.password);
+        out.push_back('\n');
+    }
+
+    std::string path = data_dir_ + "/passwords.dat";
+    const gboolean ok = g_file_set_contents(path.c_str(), out.data(), static_cast<gssize>(out.size()), nullptr);
+    g_chmod(path.c_str(), 0600);
+    return ok == TRUE;
+}
+
+std::vector<std::string> ProfileStore::load_never_save_origins() const {
+    std::vector<std::string> out;
+    std::string raw = read_optional_file(data_dir_ + "/passwords_never.txt");
+    size_t pos = 0;
+    while (pos < raw.size()) {
+        size_t nl = raw.find('\n', pos);
+        if (nl == std::string::npos) nl = raw.size();
+        std::string_view line(raw.data() + pos, nl - pos);
+        pos = nl + 1;
+        if (!line.empty()) {
+            out.emplace_back(line);
+        }
+    }
+    return out;
+}
+
+void ProfileStore::add_never_save_origin(const std::string& origin) const {
+    if (origin.empty()) return;
+    auto list = load_never_save_origins();
+    if (std::find(list.begin(), list.end(), origin) != list.end()) {
+        return;
+    }
+    list.push_back(origin);
+    std::string out;
+    for (const auto& s : list) {
+        out += sanitize_tsv(s);
+        out.push_back('\n');
+    }
+    std::string path = data_dir_ + "/passwords_never.txt";
+    g_file_set_contents(path.c_str(), out.data(), static_cast<gssize>(out.size()), nullptr);
+    g_chmod(path.c_str(), 0600);
 }
 
 std::string ProfileStore::read_optional_file(const std::string& path) const {
