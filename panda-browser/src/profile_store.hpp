@@ -41,6 +41,8 @@ struct BrowserConfig {
     bool force_dark = false;
     bool show_bookmarks_bar = true;
     bool restore_session = true;
+    bool remember_history = true;
+    bool remember_passwords = true;
     int hibernate_minutes = 5; // 0 = disabled
     std::string home_url = "panda://home";
 };
@@ -61,6 +63,13 @@ struct SessionTab {
     std::string title;
     std::string url;
     bool pinned = false;
+};
+
+struct PasswordEntry {
+    std::string origin;
+    std::string username;
+    std::string password;
+    int64_t updated_at = 0;
 };
 
 struct MemoryStats {
@@ -85,11 +94,18 @@ public:
     void save_bookmarks(const std::vector<BookmarkItem>& items) const;
 
     std::vector<HistoryItem> load_history() const;
+    void save_history(const std::vector<HistoryItem>& items) const;
+    void upsert_history(std::vector<HistoryItem>& cache, const std::string& title, const std::string& url) const;
     void append_history(const std::string& title, const std::string& url) const;
     void clear_history() const;
 
     std::vector<SessionTab> load_session() const;
     void save_session(const std::vector<SessionTab>& tabs) const;
+
+    std::vector<PasswordEntry> load_passwords() const;
+    bool save_passwords(const std::vector<PasswordEntry>& entries) const;
+    std::vector<std::string> load_never_save_origins() const;
+    void add_never_save_origin(const std::string& origin) const;
 
     std::string read_optional_file(const std::string& path) const;
     std::string build_search_url(SearchEngine engine, const std::string& query) const;
@@ -98,6 +114,10 @@ public:
     MemoryStats sample_memory_stats() const;
 
 private:
+    bool load_or_create_vault_key(uint8_t out_key[32]) const;
+    std::string encrypt_secret(const uint8_t key[32], const std::string& plaintext) const;
+    bool decrypt_secret(const uint8_t key[32], const std::string& b64, std::string& out_plain) const;
+
     std::string config_dir_;
     std::string data_dir_;
     std::string cache_dir_;
